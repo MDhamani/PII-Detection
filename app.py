@@ -3,70 +3,81 @@ import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForTokenClassification, pipeline
 
-# Load model and tokenizer
+# Load the pre-trained model and tokenizer
 model_path = "deberta3base_1024"
 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, model_max_length=1024)
 model = AutoModelForTokenClassification.from_pretrained(model_path)
 
-# Create NER pipeline
+# Create a Named Entity Recognition (NER) pipeline using the loaded model and tokenizer
+# The pipeline uses GPU if available, otherwise it defaults to CPU
 ner_pipeline = pipeline(
     "token-classification",
     model=model,
     tokenizer=tokenizer,
-    aggregation_strategy="simple",
+    aggregation_strategy="simple",  # Combine tokens into entities
     device=0 if torch.cuda.is_available() else -1
 )
 
-# Target labels
+# Define the target labels for PII detection
+# These labels represent the types of entities to be identified as PII
 target_labels = {
     'EMAIL', 'ID_NUM', 'NAME_STUDENT', 'PHONE_NUM', 
     'STREET_ADDRESS', 'URL_PERSONAL', 'USERNAME'
 }
 
+# Function to detect PII entities in the input text
 def detect_pii(text):
+    # Use the NER pipeline to extract entities from the text
     results = ner_pipeline(text)
     
+    # Filter entities to include only those matching the target labels
     filtered_entities = [{
-        'text': entity['word'],
-        'type': entity['entity_group'],
-        'start': entity['start'],
-        'end': entity['end'],
-        'score': float(entity['score'])  # Convert numpy float to Python float for JSON serialization
+        'text': entity['word'],  # Extracted text
+        'type': entity['entity_group'],  # Entity type
+        'start': entity['start'],  # Start position in the text
+        'end': entity['end'],  # End position in the text
+        'score': float(entity['score'])  # Confidence score (converted to Python float)
     } for entity in results if entity['entity_group'] in target_labels]
     
     return filtered_entities
 
+# Function to merge overlapping or adjacent entities of the same type
 def merge_entities(entities):
     if not entities:
         return []
     
-    # Sort entities by start position
+    # Sort entities by their start position
     sorted_entities = sorted(entities, key=lambda x: x['start'])
     
     merged = []
     current = None
 
     for entity in sorted_entities:
+        # Check if the current entity overlaps or is adjacent to the previous one
         if current and entity['type'] == current['type'] and entity['start'] <= current['end']:
-            # Extend the current entity if they overlap or are adjacent
+            # Extend the current entity's end position and update its text
             current['end'] = max(current['end'], entity['end'])
             current['text'] = current['text'] if entity['start'] == current['end'] else current['text'] + entity['text'][current['end']-entity['start']:]
-            current['score'] = (current['score'] + entity['score']) / 2  # Average the scores
+            # Average the confidence scores
+            current['score'] = (current['score'] + entity['score']) / 2
         else:
+            # Add the current entity to the merged list and start a new one
             if current:
                 merged.append(current)
             current = entity.copy()
     
+    # Add the last entity to the merged list
     if current:
         merged.append(current)
     
     return merged
 
+# Function to highlight PII entities in the input text
 def highlight_pii(text, entities):
-    # Create an HTML string with highlights for each PII entity
+    # Merge overlapping or adjacent entities
     entities = merge_entities(entities)
     
-    # Sort entities by start position in reverse to avoid index shifting
+    # Sort entities by start position in reverse order to avoid index shifting
     entities.sort(key=lambda x: x['start'], reverse=True)
     
     html_parts = []
@@ -81,7 +92,7 @@ def highlight_pii(text, entities):
         if end < last_end:
             html_parts.insert(0, text[end:last_end])
         
-        # Add the highlighted entity with uniform highlight color
+        # Add the highlighted entity with a tooltip showing its type
         highlight_html = f'<span class="pii-highlight" title="{entity_type}">{entity_text}</span>'
         html_parts.insert(0, highlight_html)
         
@@ -93,20 +104,24 @@ def highlight_pii(text, entities):
     
     return ''.join(html_parts)
 
+# Function to analyze the input text and return highlighted PII entities
 def analyze(text):
     if not text.strip():
+        # Return an error message if the input text is empty
         return "<p style='color:red;'>Please enter some text to analyze.</p>"
     
+    # Detect PII entities in the text
     pii = detect_pii(text)
+    # Highlight the detected entities in the text
     highlighted_text = highlight_pii(text, pii)
     
-    # Return the highlighted text section with a title
+    # Return the highlighted text wrapped in HTML
     return f"""
     <h4>Highlighted Text:</h4>
     <div class="highlighted-text">{highlighted_text}</div>
     """
 
-# Define custom CSS
+# Define custom CSS for styling the Gradio interface
 custom_css = """
 .highlighted-text {
     padding: 1em;
@@ -129,11 +144,13 @@ custom_css = """
 }
 """
 
-# Define Gradio interface
+# Define the Gradio interface
 with gr.Blocks(css=custom_css) as demo:
+    # Add a title and description
     gr.Markdown("<h1>PII Detection Tool</h1>")
     gr.Markdown("<p>Enter text to detect personally identifiable information (PII). The tool will highlight detected PII entities.</p>")
     
+    # Create a row with a text input box and a button
     with gr.Row():
         text_input = gr.Textbox(
             label="Input Text", 
@@ -145,9 +162,11 @@ with gr.Blocks(css=custom_css) as demo:
     detect_btn = gr.Button("Detect PII", elem_id="detectButton")
     output = gr.HTML(elem_id="highlightedText")
 
+    # Link the button to the analyze function
     detect_btn.click(fn=analyze, inputs=text_input, outputs=output)
 
+# Main entry point for the application
 if __name__ == "__main__":
     print("Starting PII Detection App...")
-    demo.launch()
+    demo.launch()  # Launch the Gradio app
     print("PII Detection App is running!")
